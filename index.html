@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smooth 360 Gallery</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Helvetica Neue', sans-serif; background-color: #000; }
+        
+        canvas { display: block; }
+
+        /* UI OVERLAY */
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: none; 
+            user-select: none;
+            z-index: 10;
+        }
+
+        /* MODAL POPUP */
+        #modal {
+            display: none; 
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 20;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+
+        #modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            width: auto; 
+            max-width: 95%; 
+            max-height: 95%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            text-align: center;
+            position: relative;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+
+        #modal img {
+            max-width: 100%;
+            max-height: 85vh; 
+            display: block;
+            margin: 0 auto 10px auto;
+            border: 2px solid #333;
+            object-fit: contain; 
+        }
+
+        #modal h2 { margin-top: 0; color: #333; }
+        #modal p { color: #666; line-height: 1.5; }
+
+        #close-btn {
+            position: absolute;
+            top: 10px; right: 15px;
+            font-size: 24px;
+            cursor: pointer;
+            color: #333;
+            font-weight: bold;
+        }
+        #close-btn:hover { color: red; }
+    </style>
+</head>
+<body>
+
+    <div id="info">
+        <strong>Gallery Mode (Smooth)</strong><br>
+        Drag to look around.<br>
+        <strong>Click a painting</strong> to view details.<br>
+        (Double-click walls to find new coords)
+    </div>
+
+    <div id="modal">
+        <div id="modal-content">
+            <span id="close-btn">&times;</span>
+            <img id="modal-img" src="" alt="Artwork">
+            <div id="modal-text">
+                <h2 id="modal-title">Artwork Title</h2>
+                <p id="modal-desc">Description goes here...</p>
+            </div>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- 1. CONFIGURATION ---
+        const artworks = [
+            { 
+                id: 1, 
+                title: "The Future Begins", 
+                position: { x: 193, y: 161, z: 377 },
+                scale: 1.0 // Default
+            },
+            { 
+                id: 2, 
+                title: "Second Piece", 
+                position: { x: 120, y: 170, z: -438 } 
+            },
+            { 
+                id: 3, 
+                title: "Third Piece", 
+                position: { x: -90, y: 138, z: 435 },
+                rotationY: 0.6,
+                scale: 0.86 // FIX: Shrink this one to visually match the others
+            },
+            { 
+                id: 4, 
+                title: "Fourth Piece", 
+                position: { x: -241, y: 92, z: 358 },
+                rotationY: 0.9, // Increased rotation to follow the curve
+                scale: 0.57    // Match neighbor size
+            },
+             // --- BACK / LEFT WALL (New Additions) ---
+            { 
+                id: 5, 
+                title: "Fifth Piece", 
+                position: { x: -125, y: 131, z: -377 }, 
+                rotationY: -0.5, // Negative rotation for back-left curve
+                scale: 0.77      // Slightly smaller because it is high up
+            },
+            { 
+                id: 6, 
+                title: "Sixth Piece", 
+                position: { x: -268, y: 99, z: -312 }, 
+                rotationY: -0.9, // More negative rotation as it goes further left
+                scale: 0.58
+            },
+          
+        ];
+
+
+        // --- 2. VARIABLES ---
+        let camera, scene, renderer;
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2(); // For Raycasting
+        
+        // MANUAL MOVEMENT VARIABLES (The "Smooth" Math)
+        let isUserInteracting = false;
+        let onPointerDownPointerX = 0, onPointerDownPointerY = 0;
+        
+        // FIX: Set starting rotation here
+        let lon = 179, onPointerDownLon = 0; 
+        let lat = 7, onPointerDownLat = 0;
+        
+        let phi = 0, theta = 0;
+        let isDragging = false; 
+
+        // HTML Elements
+        const modal = document.getElementById('modal');
+        const modalImg = document.getElementById('modal-img');
+        const modalTitle = document.getElementById('modal-title');
+        const modalDesc = document.getElementById('modal-desc');
+        const closeBtn = document.getElementById('close-btn');
+
+        init();
+        animate();
+
+        function init() {
+            const container = document.createElement('div');
+            document.body.appendChild(container);
+
+            // --- SCENE SETUP ---
+            scene = new THREE.Scene();
+            
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 1100);
+            camera.target = new THREE.Vector3(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            container.appendChild(renderer.domElement);
+
+             // --- PANORAMA SPHERE ---
+            const textureLoader = new THREE.TextureLoader();
+            
+            // FIX: Detect Mobile vs Desktop
+            const isMobile = window.innerWidth < 768; 
+            const panoImage = isMobile ? 'panorama_mobile.jpg' : 'panorama.jpg';
+            
+            console.log("Loading texture:", panoImage); // Check console to confirm
+
+            textureLoader.load(panoImage, function (texture) {
+                texture.colorSpace = THREE.SRGBColorSpace;
+                
+                // MATH for Strip Panorama
+                // IMPORTANT: You must use the dimensions of your DESKTOP (largest) image here.
+                // The geometry calculation relies on the original aspect ratio math.
+                // Even if the mobile image is smaller, as long as the RATIO is the same, this works.
+                const imgW = 11856; 
+                const imgH = 3040;
+                
+                const phiLength = Math.PI * 2; 
+                const thetaLength = (imgH / (imgW / 2)) * Math.PI; 
+                const thetaStart = (Math.PI - thetaLength) / 2; 
+
+                const geometry = new THREE.SphereGeometry(500, 60, 40, 0, phiLength, thetaStart, thetaLength);
+                
+                // Invert scale to see inside
+                geometry.scale(-1, 1, 1);
+                
+                const material = new THREE.MeshBasicMaterial({ map: texture });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.name = "panorama";
+                scene.add(mesh);
+            });
+
+            // --- BUILD GALLERY ---
+            artworks.forEach(art => createArtFrame(art));
+
+            // --- EVENT LISTENERS (The new manual approach) ---
+            document.addEventListener('mousedown', onPointerStart);
+            document.addEventListener('mousemove', onPointerMove);
+            document.addEventListener('mouseup', onPointerUp);
+            document.addEventListener('wheel', onDocumentMouseWheel);
+            
+            // --- ADD THESE 3 NEW LINES FOR MOBILE ---
+            document.addEventListener('touchstart', onTouchStart, { passive: false });
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend', onTouchEnd, { passive: false });
+
+
+            
+            // Resize logic
+            window.addEventListener('resize', onWindowResize);
+            
+            // Double click for Dev Coords
+            document.addEventListener('dblclick', onDoubleClick); 
+
+            // Close Modal
+            closeBtn.onclick = () => { modal.style.display = "none"; };
+            window.onclick = (event) => { if (event.target == modal) modal.style.display = "none"; };
+        }
+
+
+
+		// --- MOBILE TOUCH HANDLERS ---
+
+        function onTouchStart(event) {
+            if(modal.style.display === 'flex') return;
+            
+            isUserInteracting = true;
+            isDragging = false;
+
+            // Get the first finger touching the screen
+            const t = event.touches[0];
+
+            onPointerDownPointerX = t.clientX;
+            onPointerDownPointerY = t.clientY;
+
+            onPointerDownLon = lon;
+            onPointerDownLat = lat;
+            
+            // Update mouse coordinates for Raycasting (Clicking art)
+            mouse.x = (t.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(t.clientY / window.innerHeight) * 2 + 1;
+        }
+
+        function onTouchMove(event) {
+            if(modal.style.display === 'flex') return;
+
+            // IMPORTANT: Stops the window from scrolling while dragging
+            event.preventDefault(); 
+
+            const t = event.touches[0];
+
+            if (isUserInteracting === true) {
+                // Check for drag vs click
+                if(Math.abs(t.clientX - onPointerDownPointerX) > 2 || Math.abs(t.clientY - onPointerDownPointerY) > 2) {
+                    isDragging = true;
+                }
+
+                // The math to rotate (same as mouse)
+                lon = (onPointerDownPointerX - t.clientX) * 0.1 + onPointerDownLon;
+                lat = (t.clientY - onPointerDownPointerY) * 0.1 + onPointerDownLat;
+            }
+        }
+
+        function onTouchEnd(event) {
+            isUserInteracting = false;
+
+            // If we simply tapped (didn't drag), check for Art Click
+            if(!isDragging) {
+                checkClick();
+            }
+        }
+
+
+
+        // --- GALLERY BUILDER FUNCTION ---
+        function createArtFrame(config) {
+            const group = new THREE.Group();
+            
+            // 1. Place it
+            const safePos = new THREE.Vector3(config.position.x, config.position.y, config.position.z);
+            safePos.multiplyScalar(0.85); 
+            group.position.copy(safePos);
+
+            // 2. Orient it
+            group.lookAt(0, safePos.y, 0); 
+
+            // 3. Manual Swivel (Rotation)
+            if (config.rotationY) {
+                group.rotateY(config.rotationY);
+            }
+
+            // 4. FIX: Manual Scale (Resize specific frames)
+            // If config.scale exists, use it. Otherwise use 1.0 (default size).
+            const s = config.scale || 1.0; 
+            group.scale.set(s, s, s);
+
+            const textureLoader = new THREE.TextureLoader();
+
+            // --- SIZE CONFIGURATION ---
+            const frameWorldHeight = 270; 
+            const frameRatio = 837 / 1170; 
+            const frameWorldWidth = frameWorldHeight * frameRatio;
+
+            // Load Frame
+            textureLoader.load('frame.png', (frameTexture) => {
+                const frameGeo = new THREE.PlaneGeometry(frameWorldWidth, frameWorldHeight);
+                const frameMat = new THREE.MeshBasicMaterial({ map: frameTexture, transparent: true, side: THREE.DoubleSide });
+                const frameMesh = new THREE.Mesh(frameGeo, frameMat);
+                frameMesh.position.z = 0; 
+                group.add(frameMesh);
+            });
+
+            // Load Art
+            textureLoader.load(`${config.id}.jpg`, (artTexture) => {
+                artTexture.colorSpace = THREE.SRGBColorSpace;
+                const borderScale = 0.96; 
+                const artGeo = new THREE.PlaneGeometry(frameWorldWidth * borderScale, frameWorldHeight * borderScale);
+                const artMat = new THREE.MeshBasicMaterial({ map: artTexture, side: THREE.DoubleSide });
+                const artMesh = new THREE.Mesh(artGeo, artMat);
+                artMesh.position.z = 2; 
+                artMesh.userData = { id: config.id, title: config.title, type: 'art' }; 
+                group.add(artMesh);
+            });
+
+            // Load Text
+            const fileLoader = new THREE.FileLoader();
+            fileLoader.load(`${config.id}.txt`, (text) => {
+                group.userData.fullDescription = text; 
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.width = 1024; canvas.height = 512;
+                context.fillStyle = 'rgba(0, 0, 0, 0.6)';
+                context.fillRect(0, 0, canvas.width, canvas.height);
+                context.font = '80px Arial'; 
+                context.fillStyle = 'white';
+                context.textAlign = 'center';
+                context.fillText(text.substring(0, 30) + "...", canvas.width / 2, canvas.height / 2 + 30); 
+
+                const textTexture = new THREE.CanvasTexture(canvas);
+                const textGeo = new THREE.PlaneGeometry(200, 100);
+                const textMat = new THREE.MeshBasicMaterial({ map: textTexture, transparent: true, side: THREE.DoubleSide });
+                const textMesh = new THREE.Mesh(textGeo, textMat);
+                
+                textMesh.position.y = -(frameWorldHeight / 2) - 60; 
+                group.add(textMesh);
+            });
+
+            scene.add(group);
+        }
+
+        // --- INPUT HANDLING (The Superior Method) ---
+
+        function onPointerStart(event) {
+            if(modal.style.display === 'flex') return; // Ignore if modal open
+            
+            isUserInteracting = true;
+            isDragging = false; // Reset drag flag
+
+            onPointerDownPointerX = event.clientX;
+            onPointerDownPointerY = event.clientY;
+
+            onPointerDownLon = lon;
+            onPointerDownLat = lat;
+        }
+
+        function onPointerMove(event) {
+            if(modal.style.display === 'flex') return;
+
+            // Update Raycaster Mouse Position
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // CHECK HOVER
+            checkHover();
+
+            // HANDLE CAMERA DRAG
+            if (isUserInteracting === true) {
+                // If we move more than 2 pixels, consider it a drag, not a click
+                if(Math.abs(event.clientX - onPointerDownPointerX) > 2 || Math.abs(event.clientY - onPointerDownPointerY) > 2) {
+                    isDragging = true;
+                }
+
+                // Math to rotate camera
+                lon = (onPointerDownPointerX - event.clientX) * 0.1 + onPointerDownLon;
+                lat = (event.clientY - onPointerDownPointerY) * 0.1 + onPointerDownLat;
+            }
+        }
+
+        function onPointerUp(event) {
+            isUserInteracting = false;
+
+            // If we simply clicked (didn't drag camera), check for art click
+            if(!isDragging) {
+                checkClick();
+            }
+        }
+
+        function onDocumentMouseWheel(event) {
+            const fov = camera.fov + event.deltaY * 0.05;
+            camera.fov = THREE.MathUtils.clamp(fov, 10, 75);
+            camera.updateProjectionMatrix();
+        }
+
+        // --- INTERACTION LOGIC ---
+
+        function checkHover() {
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+            let hoveringArt = false;
+            if (intersects.length > 0) {
+                if (intersects[0].object.userData.type === 'art') {
+                    hoveringArt = true;
+                }
+            }
+            document.body.style.cursor = hoveringArt ? 'pointer' : (isUserInteracting ? 'grabbing' : 'default');
+        }
+
+        function checkClick() {
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+
+            if (intersects.length > 0) {
+                const object = intersects[0].object;
+                if (object.userData.type === 'art') {
+                    // Open Modal
+                    const artID = object.userData.id;
+                    const artTitle = object.userData.title || "Artwork";
+                    const description = object.parent.userData.fullDescription || "Loading...";
+                    modalImg.src = `${artID}.jpg`;
+                    modalTitle.innerText = artTitle;
+                    modalDesc.innerText = description;
+                    modal.style.display = "flex";
+                }
+            }
+        }
+
+        // --- DEV TOOL ---
+        function onDoubleClick(event) {
+             raycaster.setFromCamera(mouse, camera);
+             const intersects = raycaster.intersectObjects(scene.children);
+             if(intersects.length > 0 && intersects[0].object.name === "panorama") {
+                 const p = intersects[0].point;
+                 const x = Math.round(p.x * 0.9);
+                 const y = Math.round(p.y * 0.9);
+                 const z = Math.round(p.z * 0.9);
+                 console.log(`{ id: 99, title: "New", position: { x: ${x}, y: ${y}, z: ${z} } },`);
+                 alert(`Coords: ${x}, ${y}, ${z}`);
+             }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            update();
+        }
+
+        function update() {
+            // --- FIX: RESTRICT HEAD MOVEMENT ---
+            // Previously -85 to 85. 
+            // Changing to -8 and 8 limits look angle to a narrow strip.
+            lat = Math.max(-8, Math.min(8, lat)); 
+
+            phi = THREE.MathUtils.degToRad(90 - lat);
+            theta = THREE.MathUtils.degToRad(lon);
+
+            const x = 500 * Math.sin(phi) * Math.cos(theta);
+            const y = 500 * Math.cos(phi);
+            const z = 500 * Math.sin(phi) * Math.sin(theta);
+
+            camera.lookAt(x, y, z);
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
